@@ -23,37 +23,43 @@ const ChatComponent = () => {
   const [showVoiceDropdown, setShowVoiceDropdown] = useState(false);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
-  const speechSynthRef = useRef(window.speechSynthesis);
   const voiceDropdownRef = useRef(null);
+  const responseCache = useRef(new Map());
+  const currentAudio = useRef(null);
+  const audioQueue = useRef([]);
+  const eleven_lab_api_key = import.meta.env.VITE_ELEVEN_LAB_API_KEY;
 
-  // Initialize speech synthesis and voices
   useEffect(() => {
-    const loadVoices = () => {
-      const availableVoices = speechSynthRef.current.getVoices();
-      setVoices(availableVoices);
-      if (availableVoices.length > 0 && !selectedVoice) {
-        setSelectedVoice(availableVoices[0]); // Default to first voice
+    const loadVoices = async () => {
+      try {
+        const response = await fetch("https://api.elevenlabs.io/v1/voices", {
+          headers: {
+            "xi-api-key": eleven_lab_api_key,
+          },
+        });
+        const data = await response.json();
+        setVoices(data.voices);
+        if (data.voices.length > 0 && !selectedVoice) {
+          setSelectedVoice(data.voices[0]);
+        }
+      } catch (error) {
+        console.error("Failed to load ElevenLabs voices:", error);
+        setSpeechEnabled(false);
       }
     };
 
-    if (!("speechSynthesis" in window)) {
-      console.log("Text-to-speech not supported in this browser");
-      setSpeechEnabled(false);
-    } else {
-      loadVoices();
-      // Voices might not be loaded immediately in some browsers
-      speechSynthRef.current.onvoiceschanged = loadVoices;
+    if (
+      !("SpeechRecognition" in window || "webkitSpeechRecognition" in window)
+    ) {
+      console.log("Speech-to-text not supported in this browser");
     }
+    loadVoices();
 
     return () => {
-      if (speechSynthRef.current) {
-        speechSynthRef.current.cancel();
-        speechSynthRef.current.onvoiceschanged = null;
-      }
+      if (socket && socket.readyState === WebSocket.OPEN) socket.close();
     };
   }, []);
 
-  // Auto-scroll to bottom
   useEffect(() => {
     scrollToBottom();
   }, [messages, loading]);
@@ -62,38 +68,77 @@ const ChatComponent = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
-  // WebSocket connection (unchanged)
   useEffect(() => {
-      const connectWebSocket = () => {
-        const ws = new WebSocket("ws://localhost:8001/ws");
-        ws.onopen = () => {
-          console.log("Connected to WebSocket");
-          setSocket(ws);
-        };
-        ws.onmessage = (event) => {
-          const data = JSON.parse(event.data);
-          const responseMessage = { role: "assistant", content: data.response };
-          setMessages((prevMessages) => [...prevMessages, responseMessage]);
+    let currentMessage = "";
+    const speechEnabled = false;
+    const connectWebSocket = () => {
+      const ws = new WebSocket("ws://localhost:8003/ws");
+      ws.onopen = () => {
+        console.log("Connected to WebSocket");
+        setSocket(ws);
+      };
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        console.log("WebSocket Message Received:", data);
+        if (data.error) {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: data.error },
+          ]);
           setLoading(false);
-          if (speechEnabled) {
-            speakText(data.response);
+          return;
+        }
+        if (data.streak !== undefined) {
+          console.log(`Streak updated: ${data.streak}`);
+          return;
+        }
+        const responseText =
+          data.response ||
+          "I’m here, but I didn’t catch that. Can you say more?";
+        // Directly append the full response since there's no streaming
+        setMessages((prev) => {
+          const lastMsgIndex = prev.length - 1;
+          // Replace the last assistant message if it exists and is incomplete
+          if (lastMsgIndex >= 0 && prev[lastMsgIndex].role === "assistant") {
+            return [
+              ...prev.slice(0, lastMsgIndex),
+              { role: "assistant", content: responseText.trim() },
+            ];
           }
-        };
-        ws.onclose = () => {
-          console.log("WebSocket Disconnected");
-          setTimeout(() => connectWebSocket(), 3000);
-        };
-        ws.onerror = (error) => console.error("WebSocket Error:", error);
-        return ws;
+          return [...prev, { role: "assistant", content: responseText.trim() }];
+        });
+        setLoading(false);
+        if (speechEnabled && selectedVoice?.voice_id) {
+          console.log("Calling speakText with:", {
+            text: responseText.trim(),
+            polarity: data.sentiment?.polarity || 0,
+            speechEnabled,
+            voiceId: selectedVoice.voice_id,
+          });
+          setTimeout(() => {
+            speakText(responseText.trim(), data.sentiment?.polarity || 0);
+          }, 100); // Slight delay to ensure DOM interaction
+        } else {
+          console.log("speakText not called. Conditions:", {
+            speechEnabled,
+            hasVoiceId: !!selectedVoice?.voice_id,
+          });
+        }
       };
-
-      const ws = connectWebSocket();
-      return () => {
-        if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+      ws.onclose = (event) => {
+        console.log("WebSocket Closed:", event.code, event.reason);
+        setTimeout(() => connectWebSocket(), 3000);
       };
-    }, [speechEnabled]);
+      ws.onerror = (error) => console.error("WebSocket Error:", error);
+      return ws;
+    };
 
-  // Handle clicks outside voice dropdown
+    const ws = connectWebSocket();
+    return () => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+    };
+  }, [speechEnabled, selectedVoice]);
+
   useEffect(() => {
     const handleClickOutside = (event) => {
       if (
@@ -107,35 +152,93 @@ const ChatComponent = () => {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const speakText = (text) => {
-    if (speechSynthRef.current) {
-      speechSynthRef.current.cancel();
+  const streamAudio = async (text, polarity = 0, isFinal = false) => {
+    await speakText(text, polarity);
+    if (isFinal) {
+      audioQueue.current = [];
     }
+  };
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    if (selectedVoice) {
-      utterance.voice = selectedVoice;
-    }
-    utterance.rate = 1.0;
-    utterance.pitch = 1.0;
-    utterance.volume = 1.0;
+  const playNextAudio = (forceEnd = false) => {
+    if (!audioQueue.current.length || (isSpeaking && !forceEnd)) return;
+    if (currentAudio.current) currentAudio.current.pause();
 
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = (event) => {
-      console.error("Speech synthesis error:", event);
+    const { url, rate } = audioQueue.current.shift();
+    currentAudio.current = new Audio(url);
+    currentAudio.current.playbackRate = rate;
+    currentAudio.current.onplay = () => setIsSpeaking(true);
+    currentAudio.current.onended = () => {
       setIsSpeaking(false);
+      playNextAudio();
     };
+    currentAudio.current.play();
+  };
 
-    speechSynthRef.current.speak(utterance);
+  const speakText = async (text, polarity = 0) => {
+    if (responseCache.current.has(text)) {
+      const audio = new Audio(responseCache.current.get(text));
+      audio.onplay = () => setIsSpeaking(true);
+      audio.onended = () => setIsSpeaking(false);
+      audio.play();
+      return;
+    }
+
+    const voiceSettings = {
+      stability: polarity > 0 ? 0.7 : 0.9,
+      similarity_boost: 0.75,
+    };
+    const rate = polarity > 0 ? 1.1 : 0.9;
+
+    try {
+      const response = await fetch(
+        `https://api.elevenlabs.io/v1/text-to-speech/${
+          selectedVoice?.voice_id ||
+          voices[0]?.voice_id ||
+          "21m00Tcm4TlvDq8ikWAM"
+        }`,
+        {
+          method: "POST",
+          headers: {
+            "xi-api-key": eleven_lab_api_key,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ text, voice_settings: voiceSettings }),
+        }
+      );
+      if (!response.ok) {
+        throw new Error(`ElevenLabs TTS failed: ${response.statusText}`);
+      }
+      const audioBlob = await response.blob();
+      const audioUrl = URL.createObjectURL(audioBlob);
+      responseCache.current.set(text, audioUrl);
+      const audio = new Audio(audioUrl);
+      audio.playbackRate = rate;
+      audio.onplay = () => setIsSpeaking(true);
+      audio.onended = () => setIsSpeaking(false);
+      audio.play();
+    } catch (error) {
+      console.error("ElevenLabs TTS error:", error);
+      setIsSpeaking(false);
+    }
+  };
+
+  const startListening = () => {
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+    const recognition = new SpeechRecognition();
+    recognition.onresult = (event) => {
+      setInput(event.results[0][0].transcript);
+      handleSend();
+    };
+    recognition.onerror = (event) => console.error("STT error:", event);
+    recognition.start();
   };
 
   const toggleSpeech = () => {
-    if (isSpeaking) {
-      if (speechSynthRef.current) {
-        speechSynthRef.current.cancel();
-        setIsSpeaking(false);
-      }
+    if (isSpeaking && currentAudio.current) {
+      currentAudio.current.pause();
+      setIsSpeaking(false);
     }
     setSpeechEnabled(!speechEnabled);
   };
@@ -150,7 +253,9 @@ const ChatComponent = () => {
     if (socket && input.trim()) {
       const userMessage = { role: "user", content: input };
       setMessages((prevMessages) => [...prevMessages, userMessage]);
-      socket.send(JSON.stringify({ user_id: "user1", input }));
+      socket.send(
+        JSON.stringify({ user_id: "user2", input, sentiment: "neutral" })
+      );
       setInput("");
       setLoading(true);
       inputRef.current?.focus();
@@ -166,14 +271,13 @@ const ChatComponent = () => {
   };
 
   const handleNewChat = () => {
-    if (speechSynthRef.current) {
-      speechSynthRef.current.cancel();
-      setIsSpeaking(false);
-    }
+    if (currentAudio.current) currentAudio.current.pause();
     setMessages([]);
     setInput("");
     setLoading(false);
     setShowConfirmDialog(false);
+    setIsSpeaking(false);
+    audioQueue.current = [];
     inputRef.current?.focus();
   };
 
@@ -188,9 +292,12 @@ const ChatComponent = () => {
     }
   };
 
+  const rateResponse = (index, rating) => {
+    socket.send(JSON.stringify({ feedback: { msgIdx: index, rating } }));
+  };
+
   return (
     <div className="w-full max-w-lg mx-auto my-8 bg-white rounded-xl shadow-lg overflow-hidden relative">
-      {/* Header */}
       <div className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white p-4 flex justify-between items-center">
         <h2 className="text-xl font-bold">Therapy Chat</h2>
         <div className="flex items-center gap-2">
@@ -210,11 +317,11 @@ const ChatComponent = () => {
               <div className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg z-10 max-h-60 overflow-y-auto">
                 {voices.map((voice) => (
                   <button
-                    key={voice.name}
+                    key={voice.voice_id}
                     onClick={() => handleVoiceSelect(voice)}
                     className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-blue-100 hover:text-blue-900 transition-colors duration-150"
                   >
-                    {voice.name} ({voice.lang})
+                    {voice.name} ({voice.labels?.accent || "Neutral"})
                   </button>
                 ))}
               </div>
@@ -240,7 +347,6 @@ const ChatComponent = () => {
         </div>
       </div>
 
-      {/* Messages container (unchanged) */}
       <div className="h-96 overflow-y-auto p-4 bg-gray-50">
         {messages.length === 0 ? (
           <div className="flex items-center justify-center h-full text-gray-400 flex-col">
@@ -263,17 +369,43 @@ const ChatComponent = () => {
                 }`}
               >
                 <span className="whitespace-pre-wrap">{msg.content}</span>
+                {msg.role === "assistant" && (
+                  <button
+                    onClick={() => speakText(msg.content)}
+                    className="ml-2 p-1 text-gray-500 hover:text-gray-700"
+                  >
+                    <Volume2 size={16} />
+                  </button>
+                )}
               </div>
               <div
-                className={`text-xs mt-1 text-gray-500 ${
+                className={`text-xs mt-1 text-gray-500 flex justify-between ${
                   msg.role === "user" ? "text-right" : "text-left"
                 }`}
               >
-                {msg.role === "user" ? "You" : "Therapist"} •{" "}
-                {new Date().toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
+                <span>
+                  {msg.role === "user" ? "You" : "Therapist"} •{" "}
+                  {new Date().toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </span>
+                {msg.role === "assistant" && (
+                  <div>
+                    <button
+                      onClick={() => rateResponse(index, 1)}
+                      className="text-green-500 hover:text-green-700"
+                    >
+                      👍
+                    </button>
+                    <button
+                      onClick={() => rateResponse(index, -1)}
+                      className="ml-2 text-red-500 hover:text-red-700"
+                    >
+                      👎
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           ))
@@ -287,7 +419,6 @@ const ChatComponent = () => {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input area (unchanged) */}
       <form
         onSubmit={handleSend}
         className="p-4 border-t border-gray-200 bg-white"
@@ -303,6 +434,13 @@ const ChatComponent = () => {
             placeholder="Type your message..."
             disabled={loading}
           />
+          <button
+            onClick={startListening}
+            className="p-2 text-gray-500 hover:text-gray-700"
+            aria-label="Speak your message"
+          >
+            <Mic size={18} />
+          </button>
           <button
             type="submit"
             disabled={!input.trim() || loading}
@@ -321,7 +459,6 @@ const ChatComponent = () => {
         </p>
       </form>
 
-      {/* Confirmation Dialog (unchanged) */}
       {showConfirmDialog && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg p-6 max-w-sm mx-4 shadow-xl">
