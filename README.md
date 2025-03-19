@@ -1,12 +1,13 @@
-# React + Vite
+A compassionate AI-powered therapy chatbot built with Python and React, designed to provide empathetic responses and emotional support. The bot leverages OpenAI's GPT-4o for natural language understanding, ElevenLabs for text-to-speech (TTS) audio responses, and WebSocket for real-time communication.
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
-
-Currently, two official plugins are available:
-
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react/README.md) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend using TypeScript and enable type-aware lint rules. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Features
+Empathetic Responses: Uses GPT-4o to generate supportive, therapist-like responses based on user input and sentiment analysis (via TextBlob).
+Text-to-Speech: Converts responses into audio using ElevenLabs TTS, with configurable voice settings.
+Sentiment Analysis: Analyzes user input to tailor responses based on emotional tone (positive, negative, neutral).
+Real-Time Interaction: Implements WebSocket for seamless, non-streaming communication between the frontend and backend.
+Interactive UI: Built with React, featuring a clean chat interface with voice toggle, feedback (thumbs up/down), and new chat options.
+Speech-to-Text: Supports voice input using browser-based SpeechRecognition.
+Tech Stack
+Backend: Python, FastAPI, Uvicorn, OpenAI GPT-4o, ElevenLabs TTS, TextBlob
+Frontend: React, Vite, WebSocket, Lucide React icons
+Communication: WebSocket for real-time messaging
